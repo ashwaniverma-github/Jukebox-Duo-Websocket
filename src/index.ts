@@ -1,4 +1,5 @@
 import { createServer } from 'http';
+import express from 'express';
 import { Server } from 'socket.io';
 import { config } from './config';
 import { SocketService } from './services/socketService';
@@ -22,7 +23,11 @@ class WebSocketServer {
   }
 
   private initializeServer(): void {
-    this.server = createServer();
+    // Create a minimal Express app to satisfy Cloud Run health checks
+    const app = express();
+    app.get('/healthz', (_req, res) => res.status(200).send('ok'));
+    // Ensure the server listens on Cloud Run's PORT (defaults handled in startServer)
+    this.server = createServer(app);
   }
 
   private setupSocketIO(): void {
@@ -38,9 +43,11 @@ class WebSocketServer {
   }
 
   private startServer(): void {
-    this.server.listen(config.port, () => {
+    // Respect Cloud Run's PORT env var override
+    const port = Number(process.env['PORT'] || config.port);
+    this.server.listen(port, () => {
       console.log('WebSocket server started successfully!');
-      console.log(`Server URL: http://localhost:${config.port}`);
+      console.log(`Server URL: http://0.0.0.0:${port}`);
       console.log(`Socket.IO path: ${config.socket.path}`);
       console.log(`CORS origin: ${config.cors.origin}`);
       console.log(`Environment: ${config.nodeEnv}`);
