@@ -1,6 +1,6 @@
-# Music Duo WebSocket Server
+# Jukebox Duo WebSocket Server
 
-A TypeScript-based WebSocket server for real-time synchronization of music playback in the Music Duo application.
+A TypeScript-based WebSocket server for real-time synchronization of music playback in the Jukebox Duo application.
 
 ## Features
 

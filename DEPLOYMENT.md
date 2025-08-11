@@ -1,6 +1,6 @@
 # Deployment Guide
 
-This guide will help you deploy the Music Duo WebSocket server to various platforms.
+This guide will help you deploy the Jukebox Duo WebSocket server to various platforms.
 
 ## Prerequisites
 
