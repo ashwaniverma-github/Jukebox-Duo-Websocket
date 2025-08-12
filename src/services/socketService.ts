@@ -13,6 +13,8 @@ import {
 
 export class SocketService {
   private io: Server<ClientToServerEvents, ServerToClientEvents, InterServerEvents, SocketData>;
+  private roomPresence: Map<string, Map<string, { id: string; name?: string; image?: string; count: number }>> = new Map();
+  private socketState: Map<string, { userId?: string; rooms: Set<string> }> = new Map();
 
   constructor(io: Server<ClientToServerEvents, ServerToClientEvents, InterServerEvents, SocketData>) {
     this.io = io;
@@ -22,10 +24,22 @@ export class SocketService {
   private setupEventHandlers(): void {
     this.io.on('connection', (socket: Socket<ClientToServerEvents, ServerToClientEvents, InterServerEvents, SocketData>) => {
       console.log('🔌 client connected', socket.id);
+      this.socketState.set(socket.id, { rooms: new Set() });
 
       // Join room handler
       socket.on('join-room', (roomId: string) => {
         this.handleJoinRoom(socket, roomId);
+      });
+
+      // Presence join with user info
+      socket.on('presence-join', ({ roomId, user }) => {
+        this.trackPresence(socket, roomId, user);
+        this.broadcastPresence(roomId);
+      });
+
+      // Leave room handler (explicit)
+      socket.on('leave-room', ({ roomId, userId }) => {
+        this.handleLeaveRoom(socket, roomId, userId);
       });
 
       // Sync ping handler
@@ -56,6 +70,18 @@ export class SocketService {
       // Disconnect handler
       socket.on('disconnect', () => {
         this.handleDisconnect(socket);
+        // Clean up presence contributions for this socket
+        const state = this.socketState.get(socket.id);
+        if (state) {
+          const userId = state.userId;
+          for (const roomId of state.rooms) {
+            if (userId) {
+              this.decrementPresence(roomId, userId);
+              this.broadcastPresence(roomId);
+            }
+          }
+        }
+        this.socketState.delete(socket.id);
       });
     });
   }
@@ -63,8 +89,81 @@ export class SocketService {
   private handleJoinRoom(socket: Socket, roomId: string): void {
     console.log(`👥 ${socket.id} joined room ${roomId}`);
     socket.join(roomId);
+    // Track that this socket is in this room
+    const state = this.socketState.get(socket.id) || { rooms: new Set<string>() };
+    state.rooms.add(roomId);
+    this.socketState.set(socket.id, state);
     const roomSize = this.io.sockets.adapter.rooms.get(roomId)?.size || 0;
     console.log(`📊 Room ${roomId} now has ${roomSize} clients`);
+  }
+
+  private trackPresence(
+    socket: Socket,
+    roomId: string,
+    user: { id: string; name?: string; image?: string }
+  ): void {
+    // Track user association for this socket
+    const state = this.socketState.get(socket.id) || { rooms: new Set<string>() };
+    state.userId = user.id;
+    state.rooms.add(roomId);
+    this.socketState.set(socket.id, state);
+
+    // Increment presence count for user in the room
+    if (!this.roomPresence.has(roomId)) {
+      this.roomPresence.set(roomId, new Map());
+    }
+    const members = this.roomPresence.get(roomId)!;
+    const existing = members.get(user.id);
+    if (existing) {
+      existing.count += 1;
+    } else {
+      const entry: { id: string; name?: string; image?: string; count: number } = {
+        id: user.id,
+        count: 1,
+      };
+      if (user.name !== undefined) entry.name = user.name;
+      if (user.image !== undefined) entry.image = user.image;
+      members.set(user.id, entry);
+    }
+  }
+
+  private decrementPresence(roomId: string, userId: string): void {
+    const members = this.roomPresence.get(roomId);
+    if (!members) return;
+    const entry = members.get(userId);
+    if (!entry) return;
+    entry.count -= 1;
+    if (entry.count <= 0) {
+      members.delete(userId);
+    }
+    if (members.size === 0) this.roomPresence.delete(roomId);
+  }
+
+  private handleLeaveRoom(
+    socket: Socket,
+    roomId: string,
+    userId: string
+  ): void {
+    // Leave the socket.io room
+    try { socket.leave(roomId); } catch {}
+    // Update socket state
+    const state = this.socketState.get(socket.id);
+    if (state) {
+      state.rooms.delete(roomId);
+    }
+    // Decrement presence and broadcast
+    this.decrementPresence(roomId, userId);
+    this.broadcastPresence(roomId);
+  }
+
+  private broadcastPresence(roomId: string): void {
+    const members = Array.from(this.roomPresence.get(roomId)?.values() || []).map(m => {
+      const obj: { id: string; name?: string; image?: string } = { id: m.id };
+      if (m.name !== undefined) obj.name = m.name;
+      if (m.image !== undefined) obj.image = m.image;
+      return obj;
+    });
+    this.io.to(roomId).emit('room-presence', members);
   }
 
   private handleSyncPing(socket: Socket): void {

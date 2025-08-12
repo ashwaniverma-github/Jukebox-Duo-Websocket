@@ -34,6 +34,7 @@ export interface ServerToClientEvents {
   'video-changed': (newVideoId: string) => void;
   'queue-updated': (item: QueueItem) => void;
   'queue-removed': (itemId: string) => void;
+  'room-presence': (members: { id: string; name?: string; image?: string }[]) => void;
 }
 
 export interface ClientToServerEvents {
@@ -43,6 +44,8 @@ export interface ClientToServerEvents {
   'change-video': (data: ChangeVideoEvent) => void;
   'queue-updated': (data: QueueUpdatedEvent) => void;
   'queue-removed': (data: QueueRemovedEvent) => void;
+  'presence-join': (data: { roomId: string; user: { id: string; name?: string; image?: string } }) => void;
+  'leave-room': (data: { roomId: string; userId: string }) => void;
 }
 
 export interface InterServerEvents {
