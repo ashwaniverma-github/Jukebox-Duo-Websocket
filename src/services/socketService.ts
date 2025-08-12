@@ -49,22 +49,36 @@ export class SocketService {
 
       // Sync command handler
       socket.on('sync-command', (data: SyncCommand) => {
-        this.handleSyncCommand(socket, data);
+        // Gate by room membership via socket rooms; any room member is allowed
+        const { roomId } = data;
+        if (this.socketState.get(socket.id)?.rooms.has(roomId)) {
+          this.handleSyncCommand(socket, data);
+        }
       });
 
       // Change video handler
       socket.on('change-video', (data: ChangeVideoEvent) => {
-        this.handleChangeVideo(data);
+        // Gate by room membership via socket rooms; any room member is allowed
+        const { roomId } = data;
+        if (this.socketState.get(socket.id)?.rooms.has(roomId)) {
+          this.handleChangeVideo(data);
+        }
       });
 
       // Queue updated handler
       socket.on('queue-updated', (data: QueueUpdatedEvent) => {
-        this.handleQueueUpdated(data);
+        const { roomId } = data;
+        if (this.socketState.get(socket.id)?.rooms.has(roomId)) {
+          this.handleQueueUpdated(data);
+        }
       });
 
       // Queue removed handler
       socket.on('queue-removed', (data: QueueRemovedEvent) => {
-        this.handleQueueRemoved(data);
+        const { roomId } = data;
+        if (this.socketState.get(socket.id)?.rooms.has(roomId)) {
+          this.handleQueueRemoved(data);
+        }
       });
 
       // Disconnect handler
