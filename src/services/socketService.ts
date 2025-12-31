@@ -37,9 +37,12 @@ export class SocketService {
         this.broadcastPresence(roomId);
       });
 
-      // Leave room handler (explicit)
+      // Leave room handler - kept for compatibility but clients shouldn't call this
+      // (sockets auto-leave rooms on disconnect)
       socket.on('leave-room', ({ roomId, userId }) => {
-        this.handleLeaveRoom(socket, roomId, userId);
+        // Only update presence, don't call socket.leave() to avoid issues
+        this.decrementPresence(roomId, userId);
+        this.broadcastPresence(roomId);
       });
 
       // Sync ping handler
@@ -58,7 +61,6 @@ export class SocketService {
 
       // Change video handler
       socket.on('change-video', (data: ChangeVideoEvent) => {
-        // Gate by room membership via socket rooms; any room member is allowed
         const { roomId } = data;
         if (this.socketState.get(socket.id)?.rooms.has(roomId)) {
           this.handleChangeVideo(data);
@@ -153,22 +155,7 @@ export class SocketService {
     if (members.size === 0) this.roomPresence.delete(roomId);
   }
 
-  private handleLeaveRoom(
-    socket: Socket,
-    roomId: string,
-    userId: string
-  ): void {
-    // Leave the socket.io room
-    try { socket.leave(roomId); } catch {}
-    // Update socket state
-    const state = this.socketState.get(socket.id);
-    if (state) {
-      state.rooms.delete(roomId);
-    }
-    // Decrement presence and broadcast
-    this.decrementPresence(roomId, userId);
-    this.broadcastPresence(roomId);
-  }
+
 
   private broadcastPresence(roomId: string): void {
     const members = Array.from(this.roomPresence.get(roomId)?.values() || []).map(m => {
@@ -221,20 +208,4 @@ export class SocketService {
     console.log('❌ client disconnected', socket.id);
   }
 
-  // Public method to get room statistics
-  public getRoomStats(roomId: string): { roomSize: number; connectedClients: number } {
-    const roomSize = this.io.sockets.adapter.rooms.get(roomId)?.size || 0;
-    const connectedClients = this.io.engine.clientsCount;
-    return { roomSize, connectedClients };
-  }
-
-  // Public method to broadcast to all clients
-  public broadcastToAll(event: keyof ServerToClientEvents, data: any): void {
-    this.io.emit(event, data);
-  }
-
-  // Public method to broadcast to specific room
-  public broadcastToRoom(roomId: string, event: keyof ServerToClientEvents, data: any): void {
-    this.io.to(roomId).emit(event, data);
-  }
 } 
