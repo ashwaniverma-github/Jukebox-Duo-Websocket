@@ -9,7 +9,7 @@
     "dev": "ts-node-dev --respawn --transpile-only src/index.ts",
     "clean": "rm -rf dist",
     "prebuild": "npm run clean",
-    "postinstall": ""
+    "postinstall": "npm run build"
   },
   "dependencies": {
     "cors": "^2.8.5",
