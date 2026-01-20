@@ -9,6 +9,7 @@ import {
   ChangeVideoEvent,
   QueueUpdatedEvent,
   QueueRemovedEvent,
+  ThemeChangedEvent,
 } from '../types';
 
 export class SocketService {
@@ -80,6 +81,14 @@ export class SocketService {
         const { roomId } = data;
         if (this.socketState.get(socket.id)?.rooms.has(roomId)) {
           this.handleQueueRemoved(data);
+        }
+      });
+
+      // Theme changed handler
+      socket.on('theme-changed', (data: ThemeChangedEvent) => {
+        const { roomId } = data;
+        if (this.socketState.get(socket.id)?.rooms.has(roomId)) {
+          this.handleThemeChanged(data);
         }
       });
 
@@ -202,6 +211,12 @@ export class SocketService {
     console.log(`📊 Broadcasting queue-removed to ${roomSize} clients in room ${roomId}`);
     this.io.to(roomId).emit('queue-removed', itemId);
     console.log(`✅ queue-removed event emitted to room ${roomId}`);
+  }
+
+  private handleThemeChanged(data: ThemeChangedEvent): void {
+    const { roomId, theme } = data;
+    console.log(`🎨 theme-changed → room:${roomId} theme:${theme}`);
+    this.io.to(roomId).emit('theme-changed', theme);
   }
 
   private handleDisconnect(socket: Socket): void {
