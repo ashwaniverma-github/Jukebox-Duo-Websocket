@@ -112,14 +112,14 @@ export class SocketService {
   }
 
   private handleJoinRoom(socket: Socket, roomId: string): void {
-    console.log(`👥 ${socket.id} joined room ${roomId}`);
+    console.log(`${socket.id} joined room ${roomId}`);
     socket.join(roomId);
     // Track that this socket is in this room
     const state = this.socketState.get(socket.id) || { rooms: new Set<string>() };
     state.rooms.add(roomId);
     this.socketState.set(socket.id, state);
     const roomSize = this.io.sockets.adapter.rooms.get(roomId)?.size || 0;
-    console.log(`📊 Room ${roomId} now has ${roomSize} clients`);
+    console.log(`Room ${roomId} now has ${roomSize} clients`);
   }
 
   private trackPresence(
@@ -188,39 +188,39 @@ export class SocketService {
 
   private handleChangeVideo(data: ChangeVideoEvent): void {
     const { roomId, newVideoId } = data;
-    console.log(`🎬 change-video → room:${roomId} videoId:${newVideoId}`);
+    console.log(`change-video → room:${roomId} videoId:${newVideoId}`);
     const roomSize = this.io.sockets.adapter.rooms.get(roomId)?.size || 0;
-    console.log(`📊 Broadcasting video-changed to ${roomSize} clients in room ${roomId}`);
+    console.log(`Broadcasting video-changed to ${roomSize} clients in room ${roomId}`);
     this.io.to(roomId).emit('video-changed', newVideoId);
-    console.log(`✅ video-changed event emitted to room ${roomId}`);
+    console.log(`video-changed event emitted to room ${roomId}`);
   }
 
   private handleQueueUpdated(data: QueueUpdatedEvent): void {
     const { roomId, item } = data;
-    console.log(`📝 queue-updated → room:${roomId} item:${item.title}`);
+    console.log(`queue-updated → room:${roomId} item:${item.title}`);
     const roomSize = this.io.sockets.adapter.rooms.get(roomId)?.size || 0;
-    console.log(`📊 Broadcasting queue-updated to ${roomSize} clients in room ${roomId}`);
+    console.log(`Broadcasting queue-updated to ${roomSize} clients in room ${roomId}`);
     this.io.to(roomId).emit('queue-updated', item);
-    console.log(`✅ queue-updated event emitted to room ${roomId}`);
+    console.log(`queue-updated event emitted to room ${roomId}`);
   }
 
   private handleQueueRemoved(data: QueueRemovedEvent): void {
     const { roomId, itemId } = data;
-    console.log(`🗑️ queue-removed → room:${roomId} itemId:${itemId}`);
+    console.log(`queue-removed → room:${roomId} itemId:${itemId}`);
     const roomSize = this.io.sockets.adapter.rooms.get(roomId)?.size || 0;
-    console.log(`📊 Broadcasting queue-removed to ${roomSize} clients in room ${roomId}`);
+    console.log(`Broadcasting queue-removed to ${roomSize} clients in room ${roomId}`);
     this.io.to(roomId).emit('queue-removed', itemId);
-    console.log(`✅ queue-removed event emitted to room ${roomId}`);
+    console.log(`queue-removed event emitted to room ${roomId}`);
   }
 
   private handleThemeChanged(data: ThemeChangedEvent): void {
     const { roomId, theme } = data;
-    console.log(`🎨 theme-changed → room:${roomId} theme:${theme}`);
+    console.log(`theme-changed → room:${roomId} theme:${theme}`);
     this.io.to(roomId).emit('theme-changed', theme);
   }
 
   private handleDisconnect(socket: Socket): void {
-    console.log('❌ client disconnected', socket.id);
+    console.log('client disconnected', socket.id);
   }
 
 } 
