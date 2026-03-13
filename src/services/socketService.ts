@@ -89,6 +89,7 @@ export class SocketService {
           // Ensure socket has joined the room first
           const state = this.socketState.get(socket.id);
           if (!state?.rooms.has(roomId)) {
+            if (state && state.rooms.size >= MAX_ROOMS_PER_SOCKET) return;
             // Auto-join the room if not already joined
             this.handleJoinRoom(socket, roomId);
           }
@@ -107,9 +108,11 @@ export class SocketService {
         try {
           if (!this.isValidRoomId(roomId)) return;
           if (!this.isValidString(userId, 100)) return;
+          // Verify the userId matches this socket's user — prevents spoofing
+          const state = this.socketState.get(socket.id);
+          if (state?.userId !== userId) return;
           // Remove this socket from room tracking so userHasActiveSocket returns false
           socket.leave(roomId);
-          const state = this.socketState.get(socket.id);
           if (state) state.rooms.delete(roomId);
           this.removePresenceIfInactive(roomId, userId);
           this.broadcastPresence(roomId);
