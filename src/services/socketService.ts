@@ -180,6 +180,8 @@ export class SocketService {
         try {
           if (!data || !this.isValidRoomId(data.roomId)) return;
           if (!this.isValidString(data.itemId, 100)) return;
+          if (data.deletedOrder !== undefined && (typeof data.deletedOrder !== 'number' || !isFinite(data.deletedOrder))) return;
+          if (data.newCurrentIndex !== undefined && (typeof data.newCurrentIndex !== 'number' || !isFinite(data.newCurrentIndex))) return;
           const { roomId } = data;
           if (this.socketState.get(socket.id)?.rooms.has(roomId)) {
             this.handleQueueRemoved(socket, data);
