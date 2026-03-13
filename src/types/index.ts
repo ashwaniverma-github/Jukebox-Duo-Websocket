@@ -26,6 +26,8 @@ export interface QueueUpdatedEvent {
 export interface QueueRemovedEvent {
   roomId: string;
   itemId: string;
+  deletedOrder?: number;
+  newCurrentIndex?: number;
 }
 
 export interface ThemeChangedEvent {
@@ -38,7 +40,7 @@ export interface ServerToClientEvents {
   'sync-command': (data: Omit<SyncCommand, 'roomId'>) => void;
   'video-changed': (newVideoId: string) => void;
   'queue-updated': (item: QueueItem) => void;
-  'queue-removed': (itemId: string) => void;
+  'queue-removed': (data: { roomId: string; itemId: string; deletedOrder?: number; newCurrentIndex?: number }) => void;
   'room-presence': (members: { id: string; name?: string; image?: string }[]) => void;
   'theme-changed': (theme: 'default' | 'love') => void;
 }

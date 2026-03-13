@@ -25,7 +25,14 @@ class WebSocketServer {
   private initializeServer(): void {
     // Create a minimal Express app to satisfy Cloud Run health checks
     const app = express();
-    app.get('/healthz', (_req, res) => res.status(200).send('ok'));
+    app.get('/healthz', (_req, res) => {
+      if (this.isShuttingDown) {
+        res.status(503).send('shutting down');
+        return;
+      }
+      const connected = this.io?.sockets?.sockets?.size ?? 0;
+      res.status(200).json({ status: 'ok', connections: connected });
+    });
     // Ensure the server listens on Cloud Run's PORT (defaults handled in startServer)
     this.server = createServer(app);
   }
