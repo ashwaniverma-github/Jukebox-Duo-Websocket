@@ -136,7 +136,7 @@ export class SocketService {
           if (!data || !this.isValidRoomId(data.roomId)) return;
           if (data.cmd !== 'play' && data.cmd !== 'pause') return;
           if (typeof data.timestamp !== 'number' || typeof data.seekTime !== 'number') return;
-          if (!isFinite(data.seekTime) || data.seekTime < 0) return;
+          if (!isFinite(data.timestamp) || !isFinite(data.seekTime) || data.seekTime < 0) return;
           const { roomId } = data;
           if (this.socketState.get(socket.id)?.rooms.has(roomId)) {
             this.handleSyncCommand(socket, data);
