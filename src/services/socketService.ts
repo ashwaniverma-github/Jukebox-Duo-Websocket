@@ -222,7 +222,7 @@ export class SocketService {
         try {
           if (!data || !this.isValidRoomId(data.roomId)) return;
           if (typeof data.isPlaying !== 'boolean') return;
-          if (typeof data.seekTime !== 'number' || !isFinite(data.seekTime)) return;
+          if (typeof data.seekTime !== 'number' || !isFinite(data.seekTime) || data.seekTime < 0) return;
           if (typeof data.timestamp !== 'number' || !isFinite(data.timestamp)) return;
           if (this.socketState.get(socket.id)?.rooms.has(data.roomId)) {
             this.playbackState.set(data.roomId, {
