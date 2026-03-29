@@ -35,6 +35,19 @@ export interface ThemeChangedEvent {
   theme: 'default' | 'love';
 }
 
+export interface SyncHeartbeat {
+  roomId: string;
+  isPlaying: boolean;
+  seekTime: number;
+  timestamp: number;
+}
+
+export interface SyncStateResponse {
+  isPlaying: boolean;
+  seekTime: number;
+  timestamp: number;
+}
+
 export interface ServerToClientEvents {
   'sync-pong': (serverTimestamp: number) => void;
   'sync-command': (data: Omit<SyncCommand, 'roomId'>) => void;
@@ -43,6 +56,7 @@ export interface ServerToClientEvents {
   'queue-removed': (data: { roomId: string; itemId: string; deletedOrder?: number; newCurrentIndex?: number }) => void;
   'room-presence': (members: { id: string; name?: string; image?: string }[]) => void;
   'theme-changed': (theme: 'default' | 'love') => void;
+  'sync-state': (data: SyncStateResponse) => void;
 }
 
 export interface ClientToServerEvents {
@@ -55,6 +69,8 @@ export interface ClientToServerEvents {
   'presence-join': (data: { roomId: string; user: { id: string; name?: string; image?: string } }) => void;
   'leave-room': (data: { roomId: string; userId: string }) => void;
   'theme-changed': (data: ThemeChangedEvent) => void;
+  'sync-heartbeat': (data: SyncHeartbeat) => void;
+  'sync-request': (data: { roomId: string }) => void;
 }
 
 export interface InterServerEvents {

@@ -10,6 +10,7 @@ import {
   QueueUpdatedEvent,
   QueueRemovedEvent,
   ThemeChangedEvent,
+  SyncHeartbeat,
 } from '../types';
 
 export class SocketService {
@@ -17,6 +18,8 @@ export class SocketService {
   private roomPresence: Map<string, Map<string, { id: string; name?: string; image?: string }>> = new Map();
   private socketState: Map<string, { userId?: string; rooms: Set<string> }> = new Map();
   private cleanupInterval: ReturnType<typeof setInterval>;
+  private presenceThrottleTimers: Map<string, ReturnType<typeof setTimeout>> = new Map();
+  private playbackState: Map<string, { isPlaying: boolean; seekTime: number; timestamp: number }> = new Map();
 
   constructor(io: Server<ClientToServerEvents, ServerToClientEvents, InterServerEvents, SocketData>) {
     this.io = io;
@@ -57,7 +60,16 @@ export class SocketService {
           members.delete(userId);
         }
       }
-      if (members.size === 0) this.roomPresence.delete(roomId);
+      if (members.size === 0) {
+        this.roomPresence.delete(roomId);
+        this.playbackState.delete(roomId);
+        // Clean up throttle timer for empty room
+        const timer = this.presenceThrottleTimers.get(roomId);
+        if (timer) {
+          clearTimeout(timer);
+          this.presenceThrottleTimers.delete(roomId);
+        }
+      }
     }
   }
 
@@ -205,6 +217,39 @@ export class SocketService {
         }
       });
 
+      // Host sends playback state every ~5s so server can relay to late joiners
+      socket.on('sync-heartbeat', (data: SyncHeartbeat) => {
+        try {
+          if (!data || !this.isValidRoomId(data.roomId)) return;
+          if (typeof data.isPlaying !== 'boolean') return;
+          if (typeof data.seekTime !== 'number' || !isFinite(data.seekTime)) return;
+          if (typeof data.timestamp !== 'number' || !isFinite(data.timestamp)) return;
+          if (this.socketState.get(socket.id)?.rooms.has(data.roomId)) {
+            this.playbackState.set(data.roomId, {
+              isPlaying: data.isPlaying,
+              seekTime: data.seekTime,
+              timestamp: data.timestamp,
+            });
+          }
+        } catch (err) {
+          console.error('Error in sync-heartbeat handler:', err);
+        }
+      });
+
+      // Guest requests current playback state to sync on join
+      socket.on('sync-request', (data: { roomId: string }) => {
+        try {
+          if (!data || !this.isValidRoomId(data.roomId)) return;
+          if (!this.socketState.get(socket.id)?.rooms.has(data.roomId)) return;
+          const state = this.playbackState.get(data.roomId);
+          if (state) {
+            socket.emit('sync-state', state);
+          }
+        } catch (err) {
+          console.error('Error in sync-request handler:', err);
+        }
+      });
+
       // Disconnect handler — delay cleanup to avoid race with reconnection.
       // When a user switches tabs, the old socket disconnects and a new one connects.
       // If cleanup runs before the new socket joins, presence is briefly lost.
@@ -299,6 +344,23 @@ export class SocketService {
   }
 
   private broadcastPresence(roomId: string): void {
+    const members = this.roomPresence.get(roomId);
+    const memberCount = members?.size || 0;
+
+    // For large rooms (>20 members), throttle presence broadcasts to once per 2 seconds
+    if (memberCount > 20) {
+      if (this.presenceThrottleTimers.has(roomId)) return; // Already scheduled
+      this.presenceThrottleTimers.set(roomId, setTimeout(() => {
+        this.presenceThrottleTimers.delete(roomId);
+        this.emitPresence(roomId);
+      }, 2000));
+      return;
+    }
+
+    this.emitPresence(roomId);
+  }
+
+  private emitPresence(roomId: string): void {
     const members = Array.from(this.roomPresence.get(roomId)?.values() || []).map(m => {
       const obj: { id: string; name?: string; image?: string } = { id: m.id };
       if (m.name !== undefined) obj.name = m.name;
