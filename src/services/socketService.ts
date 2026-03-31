@@ -19,7 +19,7 @@ export class SocketService {
   private socketState: Map<string, { userId?: string; rooms: Set<string> }> = new Map();
   private cleanupInterval: ReturnType<typeof setInterval>;
   private presenceThrottleTimers: Map<string, ReturnType<typeof setTimeout>> = new Map();
-  private playbackState: Map<string, { isPlaying: boolean; seekTime: number; timestamp: number }> = new Map();
+  private playbackState: Map<string, { isPlaying: boolean; seekTime: number; timestamp: number; currentQueueIndex?: number }> = new Map();
 
   constructor(io: Server<ClientToServerEvents, ServerToClientEvents, InterServerEvents, SocketData>) {
     this.io = io;
@@ -224,11 +224,13 @@ export class SocketService {
           if (typeof data.isPlaying !== 'boolean') return;
           if (typeof data.seekTime !== 'number' || !isFinite(data.seekTime) || data.seekTime < 0) return;
           if (typeof data.timestamp !== 'number' || !isFinite(data.timestamp)) return;
+          if (data.currentQueueIndex !== undefined && (typeof data.currentQueueIndex !== 'number' || !isFinite(data.currentQueueIndex) || data.currentQueueIndex < 0)) return;
           if (this.socketState.get(socket.id)?.rooms.has(data.roomId)) {
             this.playbackState.set(data.roomId, {
               isPlaying: data.isPlaying,
               seekTime: data.seekTime,
               timestamp: data.timestamp,
+              ...(data.currentQueueIndex !== undefined && { currentQueueIndex: data.currentQueueIndex }),
             });
           }
         } catch (err) {

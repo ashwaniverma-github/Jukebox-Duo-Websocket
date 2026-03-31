@@ -40,12 +40,14 @@ export interface SyncHeartbeat {
   isPlaying: boolean;
   seekTime: number;
   timestamp: number;
+  currentQueueIndex?: number;
 }
 
 export interface SyncStateResponse {
   isPlaying: boolean;
   seekTime: number;
   timestamp: number;
+  currentQueueIndex?: number;
 }
 
 export interface ServerToClientEvents {
