@@ -226,7 +226,9 @@ export class SocketService {
           if (typeof data.timestamp !== 'number' || !isFinite(data.timestamp)) return;
           if (data.currentQueueIndex !== undefined && (typeof data.currentQueueIndex !== 'number' || !isFinite(data.currentQueueIndex) || data.currentQueueIndex < 0)) return;
           if (this.socketState.get(socket.id)?.rooms.has(data.roomId)) {
+            const existingState = this.playbackState.get(data.roomId);
             this.playbackState.set(data.roomId, {
+              ...existingState,
               isPlaying: data.isPlaying,
               seekTime: data.seekTime,
               timestamp: data.timestamp,
