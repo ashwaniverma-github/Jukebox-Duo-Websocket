@@ -10,7 +10,6 @@ import {
   QueueUpdatedEvent,
   QueueRemovedEvent,
   ThemeChangedEvent,
-  SyncHeartbeat,
 } from '../types';
 
 export class SocketService {
@@ -19,7 +18,6 @@ export class SocketService {
   private socketState: Map<string, { userId?: string; rooms: Set<string> }> = new Map();
   private cleanupInterval: ReturnType<typeof setInterval>;
   private presenceThrottleTimers: Map<string, ReturnType<typeof setTimeout>> = new Map();
-  private playbackState: Map<string, { isPlaying: boolean; seekTime: number; timestamp: number; currentQueueIndex?: number }> = new Map();
 
   constructor(io: Server<ClientToServerEvents, ServerToClientEvents, InterServerEvents, SocketData>) {
     this.io = io;
@@ -62,7 +60,6 @@ export class SocketService {
       }
       if (members.size === 0) {
         this.roomPresence.delete(roomId);
-        this.playbackState.delete(roomId);
         // Clean up throttle timer for empty room
         const timer = this.presenceThrottleTimers.get(roomId);
         if (timer) {
@@ -214,43 +211,6 @@ export class SocketService {
           }
         } catch (err) {
           console.error('Error in theme-changed handler:', err);
-        }
-      });
-
-      // Host sends playback state every ~5s so server can relay to late joiners
-      socket.on('sync-heartbeat', (data: SyncHeartbeat) => {
-        try {
-          if (!data || !this.isValidRoomId(data.roomId)) return;
-          if (typeof data.isPlaying !== 'boolean') return;
-          if (typeof data.seekTime !== 'number' || !isFinite(data.seekTime) || data.seekTime < 0) return;
-          if (typeof data.timestamp !== 'number' || !isFinite(data.timestamp)) return;
-          if (data.currentQueueIndex !== undefined && (typeof data.currentQueueIndex !== 'number' || !isFinite(data.currentQueueIndex) || data.currentQueueIndex < 0)) return;
-          if (this.socketState.get(socket.id)?.rooms.has(data.roomId)) {
-            const existingState = this.playbackState.get(data.roomId);
-            this.playbackState.set(data.roomId, {
-              ...existingState,
-              isPlaying: data.isPlaying,
-              seekTime: data.seekTime,
-              timestamp: data.timestamp,
-              ...(data.currentQueueIndex !== undefined && { currentQueueIndex: data.currentQueueIndex }),
-            });
-          }
-        } catch (err) {
-          console.error('Error in sync-heartbeat handler:', err);
-        }
-      });
-
-      // Guest requests current playback state to sync on join
-      socket.on('sync-request', (data: { roomId: string }) => {
-        try {
-          if (!data || !this.isValidRoomId(data.roomId)) return;
-          if (!this.socketState.get(socket.id)?.rooms.has(data.roomId)) return;
-          const state = this.playbackState.get(data.roomId);
-          if (state) {
-            socket.emit('sync-state', state);
-          }
-        } catch (err) {
-          console.error('Error in sync-request handler:', err);
         }
       });
 
