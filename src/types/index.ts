@@ -13,9 +13,13 @@ export interface ChangeVideoEvent {
 }
 
 export interface QueueItem {
+  id: string;
+  roomId?: string;
   videoId: string;
   title: string;
   thumbnail?: string;
+  order: number;
+  addedById?: string;
 }
 
 export interface QueueUpdatedEvent {
