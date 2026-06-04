@@ -10,7 +10,13 @@ import {
   QueueUpdatedEvent,
   QueueRemovedEvent,
   ThemeChangedEvent,
+  EmojiReactionEvent,
 } from '../types';
+
+// Reactions are intentionally a small fixed set. Anything outside this list is
+// rejected so clients can't broadcast arbitrary payloads. Keep this in sync with
+// REACTION_EMOJIS on the frontend (music-duo/src/components/ReactionBar.tsx).
+const ALLOWED_EMOJIS = new Set(['❤️', '😂', '🔥', '👏', '🥳', '👎']);
 
 export class SocketService {
   private io: Server<ClientToServerEvents, ServerToClientEvents, InterServerEvents, SocketData>;
@@ -18,6 +24,8 @@ export class SocketService {
   private socketState: Map<string, { userId?: string; rooms: Set<string> }> = new Map();
   private cleanupInterval: ReturnType<typeof setInterval>;
   private presenceThrottleTimers: Map<string, ReturnType<typeof setTimeout>> = new Map();
+  // Per-socket token bucket to stop one client flooding the room with reactions
+  private emojiRateLimit: Map<string, { tokens: number; last: number }> = new Map();
 
   constructor(io: Server<ClientToServerEvents, ServerToClientEvents, InterServerEvents, SocketData>) {
     this.io = io;
@@ -214,6 +222,19 @@ export class SocketService {
         }
       });
 
+      // Emoji reaction handler — transient, one-shot broadcast to others in the room
+      socket.on('emoji-reaction', (data: EmojiReactionEvent) => {
+        try {
+          if (!data || !this.isValidRoomId(data.roomId)) return;
+          if (typeof data.emoji !== 'string' || !ALLOWED_EMOJIS.has(data.emoji)) return;
+          if (!this.socketState.get(socket.id)?.rooms.has(data.roomId)) return;
+          if (!this.allowEmoji(socket.id)) return;
+          this.handleEmojiReaction(socket, data);
+        } catch (err) {
+          console.error('Error in emoji-reaction handler:', err);
+        }
+      });
+
       // Disconnect handler — delay cleanup to avoid race with reconnection.
       // When a user switches tabs, the old socket disconnects and a new one connects.
       // If cleanup runs before the new socket joins, presence is briefly lost.
@@ -221,6 +242,7 @@ export class SocketService {
       socket.on('disconnect', () => {
         try {
           this.handleDisconnect(socket);
+          this.emojiRateLimit.delete(socket.id);
           const state = this.socketState.get(socket.id);
           if (state) {
             const userId = state.userId;
@@ -369,6 +391,30 @@ export class SocketService {
     const { roomId, theme } = data;
     console.log(`theme-changed -> room:${roomId} theme:${theme}`);
     this.io.to(roomId).emit('theme-changed', theme);
+  }
+
+  // Token bucket: capacity 8, refill 5 tokens/sec. Allows quick bursts of taps
+  // but silently drops sustained floods. Cleared on disconnect.
+  private allowEmoji(socketId: string): boolean {
+    const CAPACITY = 8;
+    const REFILL_PER_SEC = 5;
+    const now = Date.now();
+    const bucket = this.emojiRateLimit.get(socketId) || { tokens: CAPACITY, last: now };
+    bucket.tokens = Math.min(CAPACITY, bucket.tokens + ((now - bucket.last) / 1000) * REFILL_PER_SEC);
+    bucket.last = now;
+    if (bucket.tokens < 1) {
+      this.emojiRateLimit.set(socketId, bucket);
+      return false;
+    }
+    bucket.tokens -= 1;
+    this.emojiRateLimit.set(socketId, bucket);
+    return true;
+  }
+
+  private handleEmojiReaction(socket: Socket, data: EmojiReactionEvent): void {
+    const { roomId, emoji } = data;
+    // Broadcast to others only — sender renders its own reaction locally
+    socket.to(roomId).emit('emoji-reaction', { emoji });
   }
 
   private handleDisconnect(socket: Socket): void {
