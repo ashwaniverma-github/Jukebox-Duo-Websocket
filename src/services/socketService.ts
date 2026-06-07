@@ -1,5 +1,7 @@
 // src/services/socketService.ts
 import { Server, Socket } from 'socket.io';
+import jwt, { JwtPayload } from 'jsonwebtoken';
+import { config } from '../config';
 import {
   ServerToClientEvents,
   ClientToServerEvents,
@@ -12,6 +14,9 @@ import {
   ThemeChangedEvent,
   EmojiReactionEvent,
 } from '../types';
+
+// Convenience alias for a fully-typed socket.
+type AppSocket = Socket<ClientToServerEvents, ServerToClientEvents, InterServerEvents, SocketData>;
 
 // Reactions are intentionally a small fixed set. Anything outside this list is
 // rejected so clients can't broadcast arbitrary payloads. Keep this in sync with
@@ -26,13 +31,65 @@ export class SocketService {
   private presenceThrottleTimers: Map<string, ReturnType<typeof setTimeout>> = new Map();
   // Per-socket token bucket to stop one client flooding the room with reactions
   private emojiRateLimit: Map<string, { tokens: number; last: number }> = new Map();
+  // Last known playback state per room, so a client that (re)joins after a drop or
+  // screen-off can be snapped back to the live position via 'sync-request'. serverTs is
+  // the server clock at the time the state was recorded, used to advance a playing
+  // position by the elapsed time when replaying.
+  private roomSyncState: Map<string, { videoId?: string; cmd: 'play' | 'pause'; seekTime: number; serverTs: number }> = new Map();
 
   constructor(io: Server<ClientToServerEvents, ServerToClientEvents, InterServerEvents, SocketData>) {
     this.io = io;
+    // Auth must be registered before connection handlers so it runs on every handshake.
+    this.setupAuthMiddleware();
     this.setupEventHandlers();
     // Periodic cleanup of stale presence entries every 5 minutes
     this.cleanupInterval = setInterval(() => this.cleanupStalePresence(), 5 * 60 * 1000);
     this.cleanupInterval.unref();
+  }
+
+  // Verify the signed handshake token and bind a trusted identity to the socket.
+  // Every connection MUST present a valid token minted by the Next.js app
+  // (/api/rooms/[id]/socket-token); there is no unauthenticated path. The token carries
+  // the user id, the room it authorizes, and whether that room's host is premium
+  // (syncEligible). Clients cannot forge it, so all later authorization reads from
+  // socket.data rather than from client-supplied payloads.
+  private setupAuthMiddleware(): void {
+    this.io.use((socket: AppSocket, next: (err?: Error) => void) => {
+      try {
+        const secret = config.auth.jwtSecret;
+        if (!secret) {
+          // Misconfigured server - fail closed.
+          return next(new Error('server auth misconfigured'));
+        }
+
+        const rawToken = (socket.handshake.auth as { token?: unknown } | undefined)?.token;
+        const token = typeof rawToken === 'string' ? rawToken : undefined;
+        if (!token) return next(new Error('unauthorized'));
+
+        const payload = jwt.verify(token, secret, { algorithms: ['HS256'] }) as JwtPayload;
+        const userId = typeof payload.sub === 'string' ? payload.sub : undefined;
+        if (!userId) return next(new Error('unauthorized'));
+
+        socket.data.userId = userId;
+        socket.data.syncEligible = payload['syncEligible'] === true;
+        if (typeof payload['roomId'] === 'string') socket.data.roomId = payload['roomId'];
+        if (typeof payload['name'] === 'string') socket.data.name = payload['name'];
+        if (typeof payload['image'] === 'string') socket.data.image = payload['image'];
+        return next();
+      } catch {
+        // Invalid/expired token.
+        return next(new Error('unauthorized'));
+      }
+    });
+  }
+
+  // Authorization gate for all live sync/broadcast events (playback, queue, theme,
+  // reactions). Every socket is authenticated by the time it reaches here, so this
+  // requires: the socket is joined to the room, the room is sync-eligible (host is
+  // premium), and the token was issued for this exact room.
+  private canSync(socket: AppSocket, roomId: string): boolean {
+    if (!this.socketState.get(socket.id)?.rooms.has(roomId)) return false;
+    return socket.data.syncEligible === true && socket.data.roomId === roomId;
   }
 
   // Input validation helpers
@@ -76,6 +133,15 @@ export class SocketService {
         }
       }
     }
+
+    // Drop saved playback state for rooms that no longer have any connected sockets,
+    // so the map can't grow unbounded over time.
+    for (const roomId of this.roomSyncState.keys()) {
+      const roomSockets = this.io.sockets.adapter.rooms.get(roomId);
+      if (!roomSockets || roomSockets.size === 0) {
+        this.roomSyncState.delete(roomId);
+      }
+    }
   }
 
   private setupEventHandlers(): void {
@@ -90,6 +156,8 @@ export class SocketService {
       socket.on('join-room', (roomId: string) => {
         try {
           if (!this.isValidRoomId(roomId)) return;
+          // A verified token authorizes exactly one room; reject mismatches.
+          if (socket.data.roomId !== roomId) return;
           const state = this.socketState.get(socket.id);
           if (state && state.rooms.size >= MAX_ROOMS_PER_SOCKET) return;
           this.handleJoinRoom(socket, roomId);
@@ -98,11 +166,21 @@ export class SocketService {
         }
       });
 
-      // Presence join with user info
-      socket.on('presence-join', ({ roomId, user }) => {
+      // Presence join. The user's identity is taken from the verified token, never from
+      // the client payload, so a client cannot impersonate another user (the `user`
+      // field in the event is ignored).
+      socket.on('presence-join', ({ roomId }) => {
         try {
           if (!this.isValidRoomId(roomId)) return;
-          if (!user || !this.isValidString(user.id, 100)) return;
+          // A verified token authorizes exactly one room; reject mismatches.
+          if (socket.data.roomId !== roomId) return;
+
+          const presenceUser: { id: string; name?: string; image?: string } = {
+            id: socket.data.userId as string,
+          };
+          if (this.isValidString(socket.data.name, 200)) presenceUser.name = socket.data.name;
+          if (this.isValidString(socket.data.image, 500)) presenceUser.image = socket.data.image;
+
           // Ensure socket has joined the room first
           const state = this.socketState.get(socket.id);
           if (!state?.rooms.has(roomId)) {
@@ -110,9 +188,6 @@ export class SocketService {
             // Auto-join the room if not already joined
             this.handleJoinRoom(socket, roomId);
           }
-          const presenceUser: { id: string; name?: string; image?: string } = { id: user.id };
-          if (this.isValidString(user.name, 200)) presenceUser.name = user.name;
-          if (this.isValidString(user.image, 500)) presenceUser.image = user.image;
           this.trackPresence(socket, roomId, presenceUser);
           this.broadcastPresence(roomId);
         } catch (err) {
@@ -125,9 +200,10 @@ export class SocketService {
         try {
           if (!this.isValidRoomId(roomId)) return;
           if (!this.isValidString(userId, 100)) return;
-          // Verify the userId matches this socket's user — prevents spoofing
           const state = this.socketState.get(socket.id);
-          if (state?.userId !== userId) return;
+          // Identity comes from the verified token - prevents evicting another user's
+          // presence by spoofing their id.
+          if (socket.data.userId !== userId) return;
           // Remove this socket from room tracking so userHasActiveSocket returns false
           socket.leave(roomId);
           if (state) state.rooms.delete(roomId);
@@ -147,6 +223,19 @@ export class SocketService {
         }
       });
 
+      // Sync request handler — a (re)joining client asks for the room's current
+      // playback state; we reply to that socket only so it can snap to the live position.
+      socket.on('sync-request', (data: { roomId: string; videoId?: string }) => {
+        try {
+          if (!data || !this.isValidRoomId(data.roomId)) return;
+          if (data.videoId !== undefined && !this.isValidString(data.videoId, 20)) return;
+          if (!this.canSync(socket, data.roomId)) return;
+          this.handleSyncRequest(socket, data.roomId, data.videoId);
+        } catch (err) {
+          console.error('Error in sync-request handler:', err);
+        }
+      });
+
       // Sync command handler
       socket.on('sync-command', (data: SyncCommand) => {
         try {
@@ -155,7 +244,7 @@ export class SocketService {
           if (typeof data.timestamp !== 'number' || typeof data.seekTime !== 'number') return;
           if (!isFinite(data.timestamp) || !isFinite(data.seekTime) || data.seekTime < 0) return;
           const { roomId } = data;
-          if (this.socketState.get(socket.id)?.rooms.has(roomId)) {
+          if (this.canSync(socket, roomId)) {
             this.handleSyncCommand(socket, data);
           }
         } catch (err) {
@@ -169,7 +258,7 @@ export class SocketService {
           if (!data || !this.isValidRoomId(data.roomId)) return;
           if (!this.isValidString(data.newVideoId, 20)) return;
           const { roomId } = data;
-          if (this.socketState.get(socket.id)?.rooms.has(roomId)) {
+          if (this.canSync(socket, roomId)) {
             this.handleChangeVideo(socket, data);
           }
         } catch (err) {
@@ -184,7 +273,7 @@ export class SocketService {
           if (!data.item || !this.isValidString(data.item.videoId, 20)) return;
           if (!this.isValidString(data.item.title, 500)) return;
           const { roomId } = data;
-          if (this.socketState.get(socket.id)?.rooms.has(roomId)) {
+          if (this.canSync(socket, roomId)) {
             this.handleQueueUpdated(socket, data);
           }
         } catch (err) {
@@ -200,7 +289,7 @@ export class SocketService {
           if (data.deletedOrder !== undefined && (typeof data.deletedOrder !== 'number' || !isFinite(data.deletedOrder))) return;
           if (data.newCurrentIndex !== undefined && (typeof data.newCurrentIndex !== 'number' || !isFinite(data.newCurrentIndex))) return;
           const { roomId } = data;
-          if (this.socketState.get(socket.id)?.rooms.has(roomId)) {
+          if (this.canSync(socket, roomId)) {
             this.handleQueueRemoved(socket, data);
           }
         } catch (err) {
@@ -214,7 +303,7 @@ export class SocketService {
           if (!data || !this.isValidRoomId(data.roomId)) return;
           if (data.theme !== 'default' && data.theme !== 'love') return;
           const { roomId } = data;
-          if (this.socketState.get(socket.id)?.rooms.has(roomId)) {
+          if (this.canSync(socket, roomId)) {
             this.handleThemeChanged(data);
           }
         } catch (err) {
@@ -227,7 +316,7 @@ export class SocketService {
         try {
           if (!data || !this.isValidRoomId(data.roomId)) return;
           if (typeof data.emoji !== 'string' || !ALLOWED_EMOJIS.has(data.emoji)) return;
-          if (!this.socketState.get(socket.id)?.rooms.has(data.roomId)) return;
+          if (!this.canSync(socket, data.roomId)) return;
           if (!this.allowEmoji(socket.id)) return;
           this.handleEmojiReaction(socket, data);
         } catch (err) {
@@ -364,6 +453,15 @@ export class SocketService {
     const { roomId, cmd, timestamp, seekTime } = data;
     console.log(`sync-command -> room:${roomId} cmd:${cmd} seek:${seekTime}`);
     socket.to(roomId).emit('sync-command', { cmd, timestamp, seekTime });
+    // Record the latest state so a (re)joiner can be snapped to it. Preserve the
+    // tracked videoId (sync-command doesn't carry one).
+    const prev = this.roomSyncState.get(roomId);
+    this.roomSyncState.set(roomId, {
+      ...(prev?.videoId !== undefined ? { videoId: prev.videoId } : {}),
+      cmd,
+      seekTime,
+      serverTs: Date.now(),
+    });
   }
 
   private handleChangeVideo(socket: Socket, data: ChangeVideoEvent): void {
@@ -371,6 +469,36 @@ export class SocketService {
     console.log(`change-video -> room:${roomId} videoId:${newVideoId}`);
     // Broadcast to others only — sender already updated their own state
     socket.to(roomId).emit('video-changed', newVideoId);
+    // New song resets position to 0. Keep the previous play/pause intent (a real
+    // sync-command for the new song will follow shortly and correct it if needed).
+    const prev = this.roomSyncState.get(roomId);
+    this.roomSyncState.set(roomId, {
+      videoId: newVideoId,
+      cmd: prev?.cmd ?? 'play',
+      seekTime: 0,
+      serverTs: Date.now(),
+    });
+  }
+
+  // Replay the room's current playback state to a single (re)joining socket. If the
+  // state is for a known video that doesn't match what the client is on, skip (avoids
+  // seeking the wrong song under replica lag); an unknown videoId is treated as the
+  // current single song and replayed. A playing position is advanced by elapsed time.
+  private handleSyncRequest(socket: AppSocket, roomId: string, clientVideoId?: string): void {
+    const state = this.roomSyncState.get(roomId);
+    if (!state) return;
+    if (state.videoId !== undefined && clientVideoId !== undefined && state.videoId !== clientVideoId) {
+      return;
+    }
+    let seekTime = state.seekTime;
+    if (state.cmd === 'play') {
+      const elapsedSec = (Date.now() - state.serverTs) / 1000;
+      if (elapsedSec > 0) seekTime = state.seekTime + elapsedSec;
+    }
+    // Small buffer so the client has time to schedule the seek/play. timestamp is in
+    // server time; the client converts it via its measured clock offset.
+    socket.emit('sync-command', { cmd: state.cmd, seekTime, timestamp: Date.now() + 200 });
+    console.log(`sync-request replay -> socket:${socket.id} room:${roomId} cmd:${state.cmd} seek:${seekTime.toFixed(1)}`);
   }
 
   private handleQueueUpdated(socket: Socket, data: QueueUpdatedEvent): void {

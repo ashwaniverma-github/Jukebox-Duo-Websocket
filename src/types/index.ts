@@ -58,6 +58,10 @@ export interface ServerToClientEvents {
 export interface ClientToServerEvents {
   'join-room': (roomId: string) => void;
   'sync-ping': (clientTimestamp: number) => void;
+  // Asks the server to replay the room's current playback state to this socket only.
+  // Sent after a (re)join so a returning client snaps to the live position. The reply
+  // is delivered via the normal 'sync-command' event (handled by the existing listener).
+  'sync-request': (data: { roomId: string; videoId?: string }) => void;
   'sync-command': (data: SyncCommand) => void;
   'change-video': (data: ChangeVideoEvent) => void;
   'queue-updated': (data: QueueUpdatedEvent) => void;
@@ -73,5 +77,11 @@ export interface InterServerEvents {
 }
 
 export interface SocketData {
-  // Add any socket-specific data if needed
-} 
+  // Verified identity + authorization, populated by the auth middleware from the
+  // signed handshake token. Never trust client-supplied values when these are set.
+  userId?: string;        // verified user id (token `sub`)
+  name?: string;          // verified display name
+  image?: string;         // verified avatar url
+  roomId?: string;        // the room this token authorizes the socket for
+  syncEligible?: boolean; // true when the room's host is premium (sync unlocked)
+}
