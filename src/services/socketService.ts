@@ -311,6 +311,32 @@ export class SocketService {
         }
       });
 
+      // Shuffle toggle handler — room-wide setting, broadcast to everyone (host-gated on client)
+      socket.on('shuffle-changed', (data: { roomId: string; shuffle: boolean }) => {
+        try {
+          if (!data || !this.isValidRoomId(data.roomId)) return;
+          if (typeof data.shuffle !== 'boolean') return;
+          if (!this.canSync(socket, data.roomId)) return;
+          console.log(`shuffle-changed -> room:${data.roomId} shuffle:${data.shuffle}`);
+          // Broadcast to others only — sender already set the new shuffle state optimistically
+          socket.to(data.roomId).emit('shuffle-changed', data.shuffle);
+        } catch (err) {
+          console.error('Error in shuffle-changed handler:', err);
+        }
+      });
+
+      // Queue cleared handler — tell others to drop their queue
+      socket.on('queue-cleared', (data: { roomId: string }) => {
+        try {
+          if (!data || !this.isValidRoomId(data.roomId)) return;
+          if (!this.canSync(socket, data.roomId)) return;
+          console.log(`queue-cleared -> room:${data.roomId}`);
+          socket.to(data.roomId).emit('queue-cleared', { roomId: data.roomId });
+        } catch (err) {
+          console.error('Error in queue-cleared handler:', err);
+        }
+      });
+
       // Emoji reaction handler — transient, one-shot broadcast to others in the room
       socket.on('emoji-reaction', (data: EmojiReactionEvent) => {
         try {

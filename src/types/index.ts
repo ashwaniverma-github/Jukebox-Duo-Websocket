@@ -53,6 +53,8 @@ export interface ServerToClientEvents {
   'room-presence': (members: { id: string; name?: string; image?: string }[]) => void;
   'theme-changed': (theme: 'default' | 'love') => void;
   'emoji-reaction': (data: { emoji: string }) => void;
+  'shuffle-changed': (shuffle: boolean) => void;
+  'queue-cleared': (data: { roomId: string }) => void;
 }
 
 export interface ClientToServerEvents {
@@ -70,6 +72,8 @@ export interface ClientToServerEvents {
   'leave-room': (data: { roomId: string; userId: string }) => void;
   'theme-changed': (data: ThemeChangedEvent) => void;
   'emoji-reaction': (data: EmojiReactionEvent) => void;
+  'shuffle-changed': (data: { roomId: string; shuffle: boolean }) => void;
+  'queue-cleared': (data: { roomId: string }) => void;
 }
 
 export interface InterServerEvents {
