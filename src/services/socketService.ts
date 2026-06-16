@@ -29,6 +29,11 @@ export class SocketService {
   private socketState: Map<string, { userId?: string; rooms: Set<string> }> = new Map();
   private cleanupInterval: ReturnType<typeof setInterval>;
   private presenceThrottleTimers: Map<string, ReturnType<typeof setTimeout>> = new Map();
+  // Room-wide shuffle state, replayed to each member on join so a late joiner sees the
+  // host's current setting instead of the default (off).
+  private roomShuffle: Map<string, boolean> = new Map();
+  // Room-wide theme, replayed to each member on join (same reason as shuffle above).
+  private roomTheme: Map<string, 'default' | 'love'> = new Map();
   // Per-socket token bucket to stop one client flooding the room with reactions
   private emojiRateLimit: Map<string, { tokens: number; last: number }> = new Map();
   // Last known playback state per room, so a client that (re)joins after a drop or
@@ -107,6 +112,8 @@ export class SocketService {
       const roomSockets = this.io.sockets.adapter.rooms.get(roomId);
       if (!roomSockets || roomSockets.size === 0) {
         this.roomPresence.delete(roomId);
+        this.roomShuffle.delete(roomId);
+        this.roomTheme.delete(roomId);
         continue;
       }
       // Remove users whose sockets are no longer connected
@@ -125,6 +132,8 @@ export class SocketService {
       }
       if (members.size === 0) {
         this.roomPresence.delete(roomId);
+        this.roomShuffle.delete(roomId);
+        this.roomTheme.delete(roomId);
         // Clean up throttle timer for empty room
         const timer = this.presenceThrottleTimers.get(roomId);
         if (timer) {
@@ -190,6 +199,12 @@ export class SocketService {
           }
           this.trackPresence(socket, roomId, presenceUser);
           this.broadcastPresence(roomId);
+          // Replay the room's current shuffle state to this joiner, so a member who joins
+          // after the host enabled shuffle sees it on (not the default off).
+          const shuffle = this.roomShuffle.get(roomId);
+          if (typeof shuffle === 'boolean') socket.emit('shuffle-changed', shuffle);
+          const theme = this.roomTheme.get(roomId);
+          if (theme) socket.emit('theme-changed', theme);
         } catch (err) {
           console.error('Error in presence-join handler:', err);
         }
@@ -318,6 +333,7 @@ export class SocketService {
           if (typeof data.shuffle !== 'boolean') return;
           if (!this.canSync(socket, data.roomId)) return;
           console.log(`shuffle-changed -> room:${data.roomId} shuffle:${data.shuffle}`);
+          this.roomShuffle.set(data.roomId, data.shuffle);
           // Broadcast to others only — sender already set the new shuffle state optimistically
           socket.to(data.roomId).emit('shuffle-changed', data.shuffle);
         } catch (err) {
@@ -544,6 +560,7 @@ export class SocketService {
   private handleThemeChanged(data: ThemeChangedEvent): void {
     const { roomId, theme } = data;
     console.log(`theme-changed -> room:${roomId} theme:${theme}`);
+    this.roomTheme.set(roomId, theme);
     this.io.to(roomId).emit('theme-changed', theme);
   }
 
