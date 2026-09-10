@@ -1,0 +1,11 @@
+# Normalize line endings.
+#
+# This working tree is shared between Windows and Linux (it lives on an NTFS
+# partition mounted by both). Without this, Windows git checks files out with
+# CRLF while Linux git expects LF, so every tracked file shows as modified after
+# switching OS - 14 files with 3912 identical insertions and deletions, and no
+# real content change.
+#
+# text=auto lets git detect text vs binary (binaries are left untouched);
+# eol=lf stores AND checks out text files with LF on every platform.
+* text=auto eol=lf
