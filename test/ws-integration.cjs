@@ -106,6 +106,71 @@ async function run() {
     fail('accepts a valid token', e && e.message);
   }
 
+  await expectRejected('rejects token without expiration', jwt.sign({ sub: 'u', roomId: 'R' }, SECRET));
+  await expectRejected('rejects token without room', mint({ sub: 'u' }));
+  await expectRejected('rejects excessive token lifetime', mint({ sub: 'u', roomId: 'R' }, { expiresIn: '1h' }));
+
+  {
+    const s = await connect(mint({ sub: 'expires', roomId: 'Rexpire', syncEligible: true }, { expiresIn: 2 }));
+    const disconnected = waitFor(s, 'disconnect', 3000);
+    s.emit('join-room', 'Rexpire');
+    if (await disconnected === 'io server disconnect') pass('idle established socket disconnects at token expiry');
+    else fail('idle established socket disconnects at token expiry');
+  }
+
+  {
+    const host = await connect(mint({ sub: 'host', roomId: 'Rhost', syncEligible: true, isHost: true }));
+    const guest = await connect(mint({ sub: 'guest', roomId: 'Rhost', syncEligible: true, isHost: false }));
+    host.emit('join-room', 'Rhost'); guest.emit('join-room', 'Rhost');
+    await sleep(100);
+    for (const [event, data] of [
+      ['theme-changed', { theme: 'love' }],
+      ['shuffle-changed', { shuffle: true }],
+      ['queue-cleared', {}],
+    ]) {
+      const receivedEvent = event === 'queue-cleared' ? 'queue-invalidated' : event;
+      const blocked = waitFor(host, receivedEvent, 250);
+      guest.emit(event, { roomId: 'Rhost', isHost: true, ...data });
+      if (await blocked === null) pass(`guest cannot forge host permission for ${event}`);
+      else fail(`guest cannot forge host permission for ${event}`);
+      const allowed = waitFor(guest, receivedEvent);
+      host.emit(event, { roomId: 'Rhost', ...data });
+      if (await allowed !== null) pass(`host can use ${event}`);
+      else fail(`host can use ${event}`);
+    }
+    guest.emit('presence-join', null);
+    guest.emit('leave-room', null);
+    const pong = waitFor(guest, 'sync-pong');
+    guest.emit('sync-ping', Date.now());
+    if (await pong !== null) pass('malformed presence events do not crash server');
+    else fail('malformed presence events do not crash server');
+    host.close(); guest.close();
+  }
+
+  {
+    const a = await connect(mint({ sub: 'queueSender', roomId: 'Rqueue', syncEligible: true }));
+    const b = await connect(mint({ sub: 'queuePeer', roomId: 'Rqueue', syncEligible: true }));
+    a.emit('join-room', 'Rqueue'); b.emit('join-room', 'Rqueue');
+    await sleep(100);
+    const injected = [];
+    b.on('queue-updated', item => injected.push(item));
+    b.on('video-changed', item => injected.push(item));
+    for (const [event, data] of [
+      ['queue-updated', { item: { id: 'fake', videoId: 'fake', title: 'forged' } }],
+      ['change-video', { newVideoId: 'fake' }],
+      ['queue-removed', { itemId: 'fake', newCurrentIndex: 999 }],
+    ]) {
+      const invalidated = waitFor(b, 'queue-invalidated');
+      a.emit(event, { roomId: 'Rqueue', ...data });
+      if (await invalidated && injected.length === 0) pass(`${event} only invalidates; forged payload is not broadcast`);
+      else fail(`${event} only invalidates`);
+    }
+    const clock = await new Promise(resolve => a.emit('clock-sync', resolve));
+    if (Math.abs(clock - Date.now()) < 1000) pass('clock sync acknowledges the current server time');
+    else fail('clock sync acknowledges the current server time');
+    a.close(); b.close();
+  }
+
   // ---- Live events flow when sync-eligible (host premium) ----
   {
     const a = await connect(mint({ sub: 'userA', roomId: 'Rbcast', syncEligible: true }));
@@ -191,7 +256,7 @@ async function run() {
     const a = await connect(mint({ sub: 'userA4', roomId: 'Rvid', syncEligible: true }));
     a.emit('join-room', 'Rvid');
     await sleep(100);
-    a.emit('change-video', { roomId: 'Rvid', newVideoId: 'VID_X' }); // server now tracks VID_X
+    a.emit('sync-command', { roomId: 'Rvid', videoId: 'VID_X', queueItemId: 'Q1', cmd: 'play', timestamp: Date.now(), seekTime: 0 });
     await sleep(150);
     const h = await connect(mint({ sub: 'userH', roomId: 'Rvid', syncEligible: true }));
     h.emit('join-room', 'Rvid');
@@ -204,7 +269,7 @@ async function run() {
     else fail('sync-request skipped on video mismatch', JSON.stringify(mismatch));
 
     const gotMatch = waitFor(h, 'sync-command', 1200);
-    h.emit('sync-request', { roomId: 'Rvid', videoId: 'VID_X' }); // correct video
+    h.emit('sync-request', { roomId: 'Rvid', videoId: 'VID_X', queueItemId: 'Q1' }); // correct video
     const match = await gotMatch;
     if (match && match.cmd) pass('sync-request replays when video matches');
     else fail('sync-request replays when video matches', JSON.stringify(match));
@@ -215,7 +280,7 @@ async function run() {
 (async () => {
   console.log('Building is assumed done. Starting server on port', PORT, '...');
   const server = spawn(process.execPath, [path.join(__dirname, '..', 'dist', 'index.js')], {
-    env: { ...process.env, PORT: String(PORT), SOCKET_JWT_SECRET: SECRET, NODE_ENV: 'test', FRONTEND_URL: 'http://localhost:3000' },
+    env: { ...process.env, PORT: String(PORT), SOCKET_JWT_SECRET: SECRET, NODE_ENV: 'test', REALTIME_SHARED_ENABLED: 'false', FRONTEND_URL: 'http://localhost:3000' },
     stdio: ['ignore', 'ignore', 'inherit'],
   });
 

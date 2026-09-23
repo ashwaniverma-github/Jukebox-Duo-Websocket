@@ -2,6 +2,11 @@
 
 export interface SyncCommand {
   roomId: string;
+  videoId?: string;
+  queueItemId?: string;
+  revision?: number;
+  generation?: string;
+  snapshot?: boolean;
   cmd: 'play' | 'pause';
   timestamp: number;
   seekTime: number;
@@ -45,6 +50,7 @@ export interface EmojiReactionEvent {
 }
 
 export interface ServerToClientEvents {
+  'queue-invalidated': () => void;
   'sync-pong': (serverTimestamp: number) => void;
   'sync-command': (data: Omit<SyncCommand, 'roomId'>) => void;
   'video-changed': (newVideoId: string) => void;
@@ -58,12 +64,14 @@ export interface ServerToClientEvents {
 }
 
 export interface ClientToServerEvents {
+  'queue-invalidated': (data: { roomId: string }) => void;
+  'clock-sync': (reply: (serverTimestamp: number) => void) => void;
   'join-room': (roomId: string) => void;
   'sync-ping': (clientTimestamp: number) => void;
   // Asks the server to replay the room's current playback state to this socket only.
   // Sent after a (re)join so a returning client snaps to the live position. The reply
   // is delivered via the normal 'sync-command' event (handled by the existing listener).
-  'sync-request': (data: { roomId: string; videoId?: string }) => void;
+  'sync-request': (data: { roomId: string; videoId?: string; queueItemId?: string }) => void;
   'sync-command': (data: SyncCommand) => void;
   'change-video': (data: ChangeVideoEvent) => void;
   'queue-updated': (data: QueueUpdatedEvent) => void;
@@ -83,6 +91,9 @@ export interface InterServerEvents {
 export interface SocketData {
   // Verified identity + authorization, populated by the auth middleware from the
   // signed handshake token. Never trust client-supplied values when these are set.
+  issuedAt?: number;
+  expiresAt?: number;
+  isHost?: boolean;
   userId?: string;        // verified user id (token `sub`)
   name?: string;          // verified display name
   image?: string;         // verified avatar url

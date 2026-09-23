@@ -1,3 +1,4 @@
+import { sharedBackend } from './services/sharedBackend';
 import { createServer } from 'http';
 import express from 'express';
 import { Server } from 'socket.io';
@@ -18,8 +19,10 @@ class WebSocketServer {
   constructor() {
     this.initializeServer();
     this.setupSocketIO();
-    this.setupSocketService();
-    this.startServer();
+    void this.setupSocketService().then(() => this.startServer()).catch((error: unknown) => {
+      console.error('Shared realtime setup failed:', error instanceof Error ? error.message : error);
+      process.exit(1);
+    });
   }
 
   private initializeServer(): void {
@@ -42,11 +45,14 @@ class WebSocketServer {
       path: config.socket.path,
       cors: config.cors,
       transports: [...config.socket.transports],
+      maxHttpBufferSize: 16384,
+      connectTimeout: 10000,
     });
   }
 
-  private setupSocketService(): void {
-    new SocketService(this.io);
+  private async setupSocketService(): Promise<void> {
+    const service = new SocketService(this.io);
+    service.setStore(await sharedBackend(this.io));
   }
 
   private startServer(): void {
