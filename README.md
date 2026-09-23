@@ -163,4 +163,19 @@ The server provides detailed logging for:
 
 ## License
 
-MIT License 
+MIT License
+## Shared realtime mode (opt-in)
+
+The updated frontend and this server must be released together; refresh existing room tabs after rollout. Queue notifications only invalidate cached state. The frontend reads authoritative queue snapshots through its authenticated HTTP API.
+
+By default, state remains process-local and deployment must use one WebSocket worker. For multiple workers, configure:
+
+- `REALTIME_SHARED_ENABLED=true` on both frontend and WebSocket deployments.
+- `SOCKET_REDIS_URL` on this server, pointing to the same trusted TLS Redis database used by the frontend's existing `REDIS_URL`.
+- The existing matching `SOCKET_JWT_SECRET` and frontend origin configuration.
+
+No schema/migration changes are required. Redis stores playback/settings with 24-hour TTLs, distributes room events, and enforces shared user limits. Playback has atomic revisions and generations; presence is aggregated across workers. Room/account deletion and entitlement changes revoke affected sockets after the database transaction commits. Revocation messages are backed by short-lived cutoff records and periodic checks; five-minute token expiry remains a fallback.
+
+Shared mode fails startup if its explicit Redis URL is missing. It does not silently fall back to independent playback writes during a Redis outage. Rollout/configuration has not been performed by this change; validate provider connectivity and capacity in staging before enabling shared mode or scaling workers.
+
+Tests: `npm test` runs the single-worker suite. `npm run test:shared` runs two workers against an automatically removed Docker Redis container, plus the sibling frontend's shared limiter tests. The sibling `music-duo` dependencies and Docker must be available. See `music-duo/ROBUSTNESS_PROGRESS.md` for the complete validation and rollout status.

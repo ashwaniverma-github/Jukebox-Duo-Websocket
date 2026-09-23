@@ -1,3 +1,4 @@
+import { RoomStore, PlaybackState } from './roomStore';
 // src/services/socketService.ts
 import { Server, Socket } from 'socket.io';
 import jwt, { JwtPayload } from 'jsonwebtoken';
@@ -29,20 +30,10 @@ export class SocketService {
   private socketState: Map<string, { userId?: string; rooms: Set<string> }> = new Map();
   private cleanupInterval: ReturnType<typeof setInterval>;
   private presenceThrottleTimers: Map<string, ReturnType<typeof setTimeout>> = new Map();
-  // Room-wide shuffle state, replayed to each member on join so a late joiner sees the
-  // host's current setting instead of the default (off).
-  private roomShuffle: Map<string, boolean> = new Map();
-  // Room-wide theme, replayed to each member on join (same reason as shuffle above).
-  private roomTheme: Map<string, 'default' | 'love'> = new Map();
   // Per-socket token bucket to stop one client flooding the room with reactions
   private emojiRateLimit: Map<string, { tokens: number; last: number }> = new Map();
-  // Last known playback state per room, so a client that (re)joins after a drop or
-  // screen-off can be snapped back to the live position via 'sync-request'. serverTs is
-  // the server clock at the time the state was recorded, used to advance a playing
-  // position by the elapsed time when replaying.
-  private roomSyncState: Map<string, { videoId?: string; cmd: 'play' | 'pause'; seekTime: number; serverTs: number }> = new Map();
 
-  constructor(io: Server<ClientToServerEvents, ServerToClientEvents, InterServerEvents, SocketData>) {
+  constructor(io: Server<ClientToServerEvents, ServerToClientEvents, InterServerEvents, SocketData>, private store = new RoomStore()) {
     this.io = io;
     // Auth must be registered before connection handlers so it runs on every handshake.
     this.setupAuthMiddleware();
@@ -51,6 +42,8 @@ export class SocketService {
     this.cleanupInterval = setInterval(() => this.cleanupStalePresence(), 5 * 60 * 1000);
     this.cleanupInterval.unref();
   }
+
+  public setStore(store: RoomStore): void { this.store = store; }
 
   // Verify the signed handshake token and bind a trusted identity to the socket.
   // Every connection MUST present a valid token minted by the Next.js app
@@ -73,8 +66,20 @@ export class SocketService {
 
         const payload = jwt.verify(token, secret, { algorithms: ['HS256'] }) as JwtPayload;
         const userId = typeof payload.sub === 'string' ? payload.sub : undefined;
-        if (!userId) return next(new Error('unauthorized'));
+        if (payload['kind'] && payload['kind'] !== 'socket-session') return next(new Error('unauthorized'));
+        if (!userId || !this.isValidRoomId(payload['roomId']) ||
+            typeof payload.exp !== 'number' || !Number.isFinite(payload.exp) ||
+            payload.exp * 1000 > Date.now() + 5 * 60 * 1000) {
+          return next(new Error('unauthorized'));
+        }
+        socket.data.expiresAt = payload.exp * 1000;
+        socket.data.issuedAt = typeof payload['issuedAt'] === 'number' ? payload['issuedAt'] : (payload.iat ?? 0) * 1000;
+        socket.data.isHost = payload['isHost'] === true;
 
+        if (this.io.sockets.sockets.size >= 10000 ||
+            [...this.io.sockets.sockets.values()].filter(peer => peer.data.userId === userId).length >= 8) {
+          return next(new Error('Connection limit reached'));
+        }
         socket.data.userId = userId;
         socket.data.syncEligible = payload['syncEligible'] === true;
         if (typeof payload['roomId'] === 'string') socket.data.roomId = payload['roomId'];
@@ -112,8 +117,8 @@ export class SocketService {
       const roomSockets = this.io.sockets.adapter.rooms.get(roomId);
       if (!roomSockets || roomSockets.size === 0) {
         this.roomPresence.delete(roomId);
-        this.roomShuffle.delete(roomId);
-        this.roomTheme.delete(roomId);
+
+
         continue;
       }
       // Remove users whose sockets are no longer connected
@@ -132,8 +137,8 @@ export class SocketService {
       }
       if (members.size === 0) {
         this.roomPresence.delete(roomId);
-        this.roomShuffle.delete(roomId);
-        this.roomTheme.delete(roomId);
+
+
         // Clean up throttle timer for empty room
         const timer = this.presenceThrottleTimers.get(roomId);
         if (timer) {
@@ -143,21 +148,40 @@ export class SocketService {
       }
     }
 
-    // Drop saved playback state for rooms that no longer have any connected sockets,
-    // so the map can't grow unbounded over time.
-    for (const roomId of this.roomSyncState.keys()) {
-      const roomSockets = this.io.sockets.adapter.rooms.get(roomId);
-      if (!roomSockets || roomSockets.size === 0) {
-        this.roomSyncState.delete(roomId);
-      }
-    }
   }
 
   private setupEventHandlers(): void {
     this.io.on('connection', (socket: Socket<ClientToServerEvents, ServerToClientEvents, InterServerEvents, SocketData>) => {
       console.log('client connected', socket.id);
       this.socketState.set(socket.id, { rooms: new Set() });
+      // Stop delivery as well as writes at expiry, even for an idle client.
+      const expiryTimer = setTimeout(() => socket.disconnect(true),
+        Math.max(0, (socket.data.expiresAt ?? 0) - Date.now()));
+      expiryTimer.unref();
+      socket.once('disconnect', () => clearTimeout(expiryTimer));
+      let tokens = 60;
+      let lastRefill = Date.now();
+      socket.use((_packet, next) => {
+        const now = Date.now();
+        tokens = Math.min(60, tokens + (now - lastRefill) * 0.02);
+        lastRefill = now;
+        if (tokens < 1) return;
+        tokens--;
+        if (Date.now() >= (socket.data.expiresAt ?? 0)) {
+          socket.disconnect(true);
+          return;
+        }
+        next();
+      });
 
+      socket.on('clock-sync', async reply => {
+        try { if (typeof reply === 'function') reply(await this.store.now()); } catch { /* client retries calibration */ }
+      });
+      socket.on('queue-invalidated', data => {
+        if (data && this.isValidRoomId(data.roomId) && this.canSync(socket, data.roomId)) {
+          socket.to(data.roomId).emit('queue-invalidated');
+        }
+      });
       // Limit rooms per socket to prevent abuse
       const MAX_ROOMS_PER_SOCKET = 5;
 
@@ -178,8 +202,10 @@ export class SocketService {
       // Presence join. The user's identity is taken from the verified token, never from
       // the client payload, so a client cannot impersonate another user (the `user`
       // field in the event is ignored).
-      socket.on('presence-join', ({ roomId }) => {
+      socket.on('presence-join', async (data) => {
         try {
+          if (!data) return;
+          const { roomId } = data;
           if (!this.isValidRoomId(roomId)) return;
           // A verified token authorizes exactly one room; reject mismatches.
           if (socket.data.roomId !== roomId) return;
@@ -201,9 +227,9 @@ export class SocketService {
           this.broadcastPresence(roomId);
           // Replay the room's current shuffle state to this joiner, so a member who joins
           // after the host enabled shuffle sees it on (not the default off).
-          const shuffle = this.roomShuffle.get(roomId);
+          const shuffle = await this.store.get<boolean>(roomId, 'shuffle');
           if (typeof shuffle === 'boolean') socket.emit('shuffle-changed', shuffle);
-          const theme = this.roomTheme.get(roomId);
+          const theme = await this.store.get<'default' | 'love'>(roomId, 'theme');
           if (theme) socket.emit('theme-changed', theme);
         } catch (err) {
           console.error('Error in presence-join handler:', err);
@@ -211,8 +237,10 @@ export class SocketService {
       });
 
       // Leave room handler
-      socket.on('leave-room', ({ roomId, userId }) => {
+      socket.on('leave-room', (data) => {
         try {
+          if (!data) return;
+          const { roomId, userId } = data;
           if (!this.isValidRoomId(roomId)) return;
           if (!this.isValidString(userId, 100)) return;
           const state = this.socketState.get(socket.id);
@@ -240,27 +268,29 @@ export class SocketService {
 
       // Sync request handler — a (re)joining client asks for the room's current
       // playback state; we reply to that socket only so it can snap to the live position.
-      socket.on('sync-request', (data: { roomId: string; videoId?: string }) => {
+      socket.on('sync-request', async (data: { roomId: string; videoId?: string; queueItemId?: string }) => {
         try {
           if (!data || !this.isValidRoomId(data.roomId)) return;
           if (data.videoId !== undefined && !this.isValidString(data.videoId, 20)) return;
           if (!this.canSync(socket, data.roomId)) return;
-          this.handleSyncRequest(socket, data.roomId, data.videoId);
+          await this.handleSyncRequest(socket, data.roomId, data.videoId, data.queueItemId);
         } catch (err) {
           console.error('Error in sync-request handler:', err);
         }
       });
 
       // Sync command handler
-      socket.on('sync-command', (data: SyncCommand) => {
+      socket.on('sync-command', async (data: SyncCommand) => {
         try {
           if (!data || !this.isValidRoomId(data.roomId)) return;
           if (data.cmd !== 'play' && data.cmd !== 'pause') return;
           if (typeof data.timestamp !== 'number' || typeof data.seekTime !== 'number') return;
           if (!isFinite(data.timestamp) || !isFinite(data.seekTime) || data.seekTime < 0) return;
+          if (data.videoId !== undefined && !this.isValidString(data.videoId, 20)) return;
+          if (data.queueItemId !== undefined && !this.isValidString(data.queueItemId, 100)) return;
           const { roomId } = data;
           if (this.canSync(socket, roomId)) {
-            this.handleSyncCommand(socket, data);
+            await this.handleSyncCommand(socket, data);
           }
         } catch (err) {
           console.error('Error in sync-command handler:', err);
@@ -313,27 +343,27 @@ export class SocketService {
       });
 
       // Theme changed handler
-      socket.on('theme-changed', (data: ThemeChangedEvent) => {
+      socket.on('theme-changed', async (data: ThemeChangedEvent) => {
         try {
           if (!data || !this.isValidRoomId(data.roomId)) return;
           if (data.theme !== 'default' && data.theme !== 'love') return;
           const { roomId } = data;
-          if (this.canSync(socket, roomId)) {
-            this.handleThemeChanged(data);
+          if (this.canSync(socket, roomId) && socket.data.isHost === true) {
+            await this.handleThemeChanged(data);
           }
         } catch (err) {
           console.error('Error in theme-changed handler:', err);
         }
       });
 
-      // Shuffle toggle handler — room-wide setting, broadcast to everyone (host-gated on client)
-      socket.on('shuffle-changed', (data: { roomId: string; shuffle: boolean }) => {
+      // Shuffle toggle handler — room-wide setting, authorized by the signed host claim
+      socket.on('shuffle-changed', async (data: { roomId: string; shuffle: boolean }) => {
         try {
           if (!data || !this.isValidRoomId(data.roomId)) return;
           if (typeof data.shuffle !== 'boolean') return;
-          if (!this.canSync(socket, data.roomId)) return;
+          if (!this.canSync(socket, data.roomId) || socket.data.isHost !== true) return;
           console.log(`shuffle-changed -> room:${data.roomId} shuffle:${data.shuffle}`);
-          this.roomShuffle.set(data.roomId, data.shuffle);
+          await this.store.set(data.roomId, 'shuffle', data.shuffle);
           // Broadcast to others only — sender already set the new shuffle state optimistically
           socket.to(data.roomId).emit('shuffle-changed', data.shuffle);
         } catch (err) {
@@ -341,13 +371,13 @@ export class SocketService {
         }
       });
 
-      // Queue cleared handler — tell others to drop their queue
+      // Queue cleared handler - request an authoritative queue refresh
       socket.on('queue-cleared', (data: { roomId: string }) => {
         try {
           if (!data || !this.isValidRoomId(data.roomId)) return;
-          if (!this.canSync(socket, data.roomId)) return;
+          if (!this.canSync(socket, data.roomId) || socket.data.isHost !== true) return;
           console.log(`queue-cleared -> room:${data.roomId}`);
-          socket.to(data.roomId).emit('queue-cleared', { roomId: data.roomId });
+          socket.to(data.roomId).emit('queue-invalidated');
         } catch (err) {
           console.error('Error in queue-cleared handler:', err);
         }
@@ -478,90 +508,58 @@ export class SocketService {
   }
 
   private emitPresence(roomId: string): void {
-    const members = Array.from(this.roomPresence.get(roomId)?.values() || []).map(m => {
-      const obj: { id: string; name?: string; image?: string } = { id: m.id };
-      if (m.name !== undefined) obj.name = m.name;
-      if (m.image !== undefined) obj.image = m.image;
-      return obj;
-    });
-    this.io.to(roomId).emit('room-presence', members);
+    void this.io.in(roomId).fetchSockets().then(sockets => {
+      const members = new Map<string, { id: string; name?: string; image?: string }>();
+      for (const socket of sockets) {
+        const { userId, name, image, expiresAt } = socket.data;
+        if (!userId || !expiresAt || expiresAt <= Date.now()) continue;
+        members.set(userId, { id: userId, ...(name ? { name } : {}), ...(image ? { image } : {}) });
+      }
+      this.io.to(roomId).emit('room-presence', [...members.values()]);
+    }).catch(error => console.warn('Presence temporarily unavailable', error));
   }
 
   private handleSyncPing(socket: Socket): void {
     socket.emit('sync-pong', Date.now());
   }
 
-  private handleSyncCommand(socket: Socket, data: SyncCommand): void {
-    const { roomId, cmd, timestamp, seekTime } = data;
-    console.log(`sync-command -> room:${roomId} cmd:${cmd} seek:${seekTime}`);
-    socket.to(roomId).emit('sync-command', { cmd, timestamp, seekTime });
-    // Record the latest state so a (re)joiner can be snapped to it. Preserve the
-    // tracked videoId (sync-command doesn't carry one).
-    const prev = this.roomSyncState.get(roomId);
-    this.roomSyncState.set(roomId, {
-      ...(prev?.videoId !== undefined ? { videoId: prev.videoId } : {}),
-      cmd,
-      seekTime,
-      serverTs: Date.now(),
+  private async handleSyncCommand(socket: AppSocket, data: SyncCommand): Promise<void> {
+    const now = await this.store.now();
+    // Clients send the server-clock instant at which their local action occurred.
+    // Clamp uncalibrated/legacy timestamps so no sender can schedule unbounded timers.
+    const timestamp = Math.max(now - 2000, Math.min(now, data.timestamp));
+    const state = await this.store.playback(data.roomId, {
+      cmd: data.cmd, seekTime: data.seekTime, timestamp,
+      ...(data.videoId ? { videoId: data.videoId } : {}),
+      ...(data.queueItemId ? { queueItemId: data.queueItemId } : {}),
     });
+    if (socket.connected && this.canSync(socket, data.roomId)) this.io.to(data.roomId).emit('sync-command', state);
   }
 
   private handleChangeVideo(socket: Socket, data: ChangeVideoEvent): void {
-    const { roomId, newVideoId } = data;
-    console.log(`change-video -> room:${roomId} videoId:${newVideoId}`);
-    // Broadcast to others only — sender already updated their own state
-    socket.to(roomId).emit('video-changed', newVideoId);
-    // New song resets position to 0. Keep the previous play/pause intent (a real
-    // sync-command for the new song will follow shortly and correct it if needed).
-    const prev = this.roomSyncState.get(roomId);
-    this.roomSyncState.set(roomId, {
-      videoId: newVideoId,
-      cmd: prev?.cmd ?? 'play',
-      seekTime: 0,
-      serverTs: Date.now(),
-    });
+    // Legacy clients may request a refresh, but cannot select a song by websocket.
+    socket.to(data.roomId).emit('queue-invalidated');
   }
 
-  // Replay the room's current playback state to a single (re)joining socket. If the
-  // state is for a known video that doesn't match what the client is on, skip (avoids
-  // seeking the wrong song under replica lag); an unknown videoId is treated as the
-  // current single song and replayed. A playing position is advanced by elapsed time.
-  private handleSyncRequest(socket: AppSocket, roomId: string, clientVideoId?: string): void {
-    const state = this.roomSyncState.get(roomId);
-    if (!state) return;
-    if (state.videoId !== undefined && clientVideoId !== undefined && state.videoId !== clientVideoId) {
-      return;
-    }
-    let seekTime = state.seekTime;
-    if (state.cmd === 'play') {
-      const elapsedSec = (Date.now() - state.serverTs) / 1000;
-      if (elapsedSec > 0) seekTime = state.seekTime + elapsedSec;
-    }
-    // Small buffer so the client has time to schedule the seek/play. timestamp is in
-    // server time; the client converts it via its measured clock offset.
-    socket.emit('sync-command', { cmd: state.cmd, seekTime, timestamp: Date.now() + 200 });
-    console.log(`sync-request replay -> socket:${socket.id} room:${roomId} cmd:${state.cmd} seek:${seekTime.toFixed(1)}`);
+  private async handleSyncRequest(socket: AppSocket, roomId: string, videoId?: string, queueItemId?: string): Promise<void> {
+    const state = await this.store.get<PlaybackState>(roomId, 'playback');
+    if (!state || !socket.connected || !this.canSync(socket, roomId)) return;
+    if (state.videoId && state.videoId !== videoId) return;
+    if (state.queueItemId && state.queueItemId !== queueItemId) return;
+    socket.emit('sync-command', { ...state, snapshot: true });
   }
 
   private handleQueueUpdated(socket: Socket, data: QueueUpdatedEvent): void {
-    const { roomId, item } = data;
-    console.log(`queue-updated -> room:${roomId} item:${item.title}`);
-    // Broadcast to others only — sender already refreshed their own queue
-    socket.to(roomId).emit('queue-updated', item);
+    socket.to(data.roomId).emit('queue-invalidated');
   }
 
   private handleQueueRemoved(socket: Socket, data: QueueRemovedEvent): void {
-    const { roomId, itemId, deletedOrder, newCurrentIndex } = data;
-    console.log(`queue-removed -> room:${roomId} itemId:${itemId}`);
-    // Forward full data so receivers can update their index without extra fetch
-    socket.to(roomId).emit('queue-removed', { roomId, itemId, deletedOrder, newCurrentIndex });
+    socket.to(data.roomId).emit('queue-invalidated');
   }
 
-  private handleThemeChanged(data: ThemeChangedEvent): void {
-    const { roomId, theme } = data;
-    console.log(`theme-changed -> room:${roomId} theme:${theme}`);
-    this.roomTheme.set(roomId, theme);
-    this.io.to(roomId).emit('theme-changed', theme);
+  private async handleThemeChanged(data: ThemeChangedEvent): Promise<void> {
+    await this.store.set(data.roomId, 'theme', data.theme);
+    this.io.to(data.roomId).emit('theme-changed', data.theme);
   }
 
   // Token bucket: capacity 8, refill 5 tokens/sec. Allows quick bursts of taps
