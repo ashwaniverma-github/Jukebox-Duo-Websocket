@@ -32,8 +32,10 @@ const openSockets = [];
 function pass(label) { passed++; console.log(`  PASS  ${label}`); }
 function fail(label, detail) { failed++; console.log(`  FAIL  ${label}${detail ? ` - ${detail}` : ''}`); }
 
+// Tokens are minted like the Next.js socket-token route: kind 'socket-session'
+// unless a test overrides it.
 function mint(payload, opts = {}) {
-  return jwt.sign(payload, SECRET, { algorithm: 'HS256', expiresIn: '5m', ...opts });
+  return jwt.sign({ kind: 'socket-session', ...payload }, SECRET, { algorithm: 'HS256', expiresIn: '5m', ...opts });
 }
 
 function newSocket(token) {
@@ -95,8 +97,8 @@ async function run() {
   // ---- Auth gate ----
   await expectRejected('rejects connection with NO token', undefined);
   await expectRejected('rejects connection with a malformed token', 'not-a-jwt');
-  await expectRejected('rejects token signed with the WRONG secret', jwt.sign({ sub: 'u', roomId: 'R' }, 'wrong-secret', { algorithm: 'HS256', expiresIn: '5m' }));
-  await expectRejected('rejects an EXPIRED token', jwt.sign({ sub: 'u', roomId: 'R', exp: Math.floor(Date.now() / 1000) - 10 }, SECRET, { algorithm: 'HS256' }));
+  await expectRejected('rejects token signed with the WRONG secret', jwt.sign({ kind: 'socket-session', sub: 'u', roomId: 'R' }, 'wrong-secret', { algorithm: 'HS256', expiresIn: '5m' }));
+  await expectRejected('rejects an EXPIRED token', jwt.sign({ kind: 'socket-session', sub: 'u', roomId: 'R', exp: Math.floor(Date.now() / 1000) - 10 }, SECRET, { algorithm: 'HS256' }));
 
   try {
     const s = await connect(mint({ sub: 'userValid', roomId: 'Rok', syncEligible: true }));
@@ -106,9 +108,12 @@ async function run() {
     fail('accepts a valid token', e && e.message);
   }
 
-  await expectRejected('rejects token without expiration', jwt.sign({ sub: 'u', roomId: 'R' }, SECRET));
+  await expectRejected('rejects token without expiration', jwt.sign({ kind: 'socket-session', sub: 'u', roomId: 'R' }, SECRET));
   await expectRejected('rejects token without room', mint({ sub: 'u' }));
   await expectRejected('rejects excessive token lifetime', mint({ sub: 'u', roomId: 'R' }, { expiresIn: '1h' }));
+  // Otherwise-valid tokens that are not socket sessions (signed directly, bypassing mint's default).
+  await expectRejected('rejects token with no kind claim', jwt.sign({ sub: 'u', roomId: 'R', syncEligible: true }, SECRET, { algorithm: 'HS256', expiresIn: '5m' }));
+  await expectRejected('rejects token of another kind', mint({ sub: 'u', roomId: 'R', syncEligible: true, kind: 'password-reset' }));
 
   {
     const s = await connect(mint({ sub: 'expires', roomId: 'Rexpire', syncEligible: true }, { expiresIn: 2 }));
