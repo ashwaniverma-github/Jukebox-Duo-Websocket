@@ -66,7 +66,9 @@ export class SocketService {
 
         const payload = jwt.verify(token, secret, { algorithms: ['HS256'] }) as JwtPayload;
         const userId = typeof payload.sub === 'string' ? payload.sub : undefined;
-        if (payload['kind'] && payload['kind'] !== 'socket-session') return next(new Error('unauthorized'));
+        // Required, not just checked when present: only tokens minted as socket
+        // sessions are accepted, even if this secret ever signs anything else.
+        if (payload['kind'] !== 'socket-session') return next(new Error('unauthorized'));
         if (!userId || !this.isValidRoomId(payload['roomId']) ||
             typeof payload.exp !== 'number' || !Number.isFinite(payload.exp) ||
             payload.exp * 1000 > Date.now() + 5 * 60 * 1000) {

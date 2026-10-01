@@ -68,7 +68,7 @@ async function worker(url) {
   throw new Error('Worker not ready');
 }
 function token(user, isHost = false) {
-  return jwt.sign({ sub: user, roomId: 'room', syncEligible: true, isHost, issuedAt: Date.now() }, secret, { expiresIn: 300 });
+  return jwt.sign({ kind: 'socket-session', sub: user, roomId: 'room', syncEligible: true, isHost, issuedAt: Date.now() }, secret, { expiresIn: 300 });
 }
 function connect(port, auth) {
   return new Promise((resolve, reject) => {
