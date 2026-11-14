@@ -47,6 +47,13 @@ class WebSocketServer {
       transports: [...config.socket.transports],
       maxHttpBufferSize: 16384,
       connectTimeout: 10000,
+      // Notice a dead connection within about 25s instead of Socket.IO's default 45s (25s + 20s).
+      // Until it is noticed neither side reconnects, and that device misses song changes. The 15s
+      // reply window still rides out a brief stall (a phone switching networks). A device that is
+      // cut off recovers on reconnect: it rejoins the room, re-reads the queue and asks for the
+      // room's position (the app's rejoin), and every device asks for the position every 10s.
+      pingInterval: 10000,
+      pingTimeout: 15000,
     });
   }
 
